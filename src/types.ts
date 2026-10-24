@@ -14,6 +14,8 @@ export type Player = {
 };
 export type Room = {
   code: string;
+  gameId: string | null;
+  serverTime: number;
   name: string;
   genre: string;
   maxPlayers: number;

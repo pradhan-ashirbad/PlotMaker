@@ -1,6 +1,15 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { io } from "socket.io-client";
+import { socket, request, RequestError } from "./connection";
+import {
+  getSession,
+  saveSession,
+  clearSession,
+  releaseSession,
+  readDraft,
+  writeDraft,
+  type Session,
+} from "./session";
 import { AnimatePresence, motion, MotionConfig } from "framer-motion";
 import {
   ArrowRight,
@@ -31,7 +40,6 @@ import type { Room, Player, Panel } from "./types";
 import { download, storyImage } from "./export";
 import "./styles.css";
 
-const socket = io({ autoConnect: false });
 const genres = ["Comedy", "Horror", "Mystery", "Fantasy", "Sci-Fi", "Random"];
 const genreIcons = ["😂", "👻", "🔍", "🐉", "🛸", "🎲"];
 const twists = [
@@ -47,42 +55,6 @@ const twists = [
   "Make the solution worse than the problem.",
 ];
 const colors = ["violet", "yellow", "mint", "coral"];
-type Reply = { ok: boolean; error?: string; code?: string; token?: string };
-function request(event: string, data = {}): Promise<Reply> {
-  return new Promise((resolve, reject) => {
-    if (!socket.connected) {
-      reject(new Error("Connecting to the server. Please try again shortly."));
-      return;
-    }
-    socket
-      .timeout(7000)
-      .emit(event, data, (err: Error | null, reply: Reply) =>
-        err
-          ? reject(
-              new Error(
-                "The server did not respond. Reconnect before trying again.",
-              ),
-            )
-          : reply.ok
-            ? resolve(reply)
-            : reject(new Error(reply.error)),
-      );
-  });
-}
-function getSession() {
-  try {
-    return JSON.parse(localStorage.getItem("plotrelay-session") || "null");
-  } catch {
-    return null;
-  }
-}
-function clearSession() {
-  try {
-    localStorage.removeItem("plotrelay-session");
-  } catch {
-    /* storage unavailable */
-  }
-}
 function Avatar({
   player,
   index = 0,
@@ -458,7 +430,7 @@ function RoomForm({
                 defaultValue={
                   new URLSearchParams(location.search).get("room") || ""
                 }
-                maxLength={10}
+                maxLength={2048}
                 required
                 autoComplete="off"
                 autoCapitalize="characters"
@@ -497,21 +469,24 @@ function GameRoom({
   busy: boolean;
   notify: (text: string) => void;
 }) {
-  const [text, setText] = useState("");
+  const draftKey = `plotrelay-draft:${room.code}:${room.gameId}:${room.you}:${room.turn}`;
+  const [text, setText] = useState(() => readDraft(draftKey));
   const [twist, setTwist] = useState("");
   const [visible, setVisible] = useState(0);
   const [replay, setReplay] = useState(0);
-  const [now, setNow] = useState(Date.now());
+  const clockOffset = useRef(room.serverTime - Date.now());
+  const [now, setNow] = useState(() => Date.now() + clockOffset.current);
+  const [showInvite, setShowInvite] = useState(false);
+  const inviteUrl = `${location.origin}/?room=${room.code}`;
   const host = room.you === room.hostId;
   const writer = room.currentPlayerId === room.you;
   const current = room.players.find((p) => p.id === room.currentPlayerId);
   const connected = room.players.filter((p) => p.connected).length;
   useEffect(() => {
-    setText("");
-    setTwist("");
-  }, [room.turn, room.status]);
+    clockOffset.current = room.serverTime - Date.now();
+  }, [room.serverTime]);
   useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 1000);
+    const t = setInterval(() => setNow(Date.now() + clockOffset.current), 1000);
     return () => clearInterval(t);
   }, []);
   useEffect(() => {
@@ -526,12 +501,15 @@ function GameRoom({
     return () => clearInterval(t);
   }, [room.status, room.panels.length, replay]);
   async function copyInvite() {
-    const url = `${location.origin}/?room=${room.code}`;
+    const url = inviteUrl;
     try {
       await navigator.clipboard.writeText(url);
       notify("Invitation link copied. Assemble your cast!");
     } catch {
-      notify(`Invite your friends: ${url}`);
+      setShowInvite(true);
+      notify(
+        "Copy the invitation from the field below. Clipboard access is unavailable in this browser.",
+      );
     }
   }
   async function share() {
@@ -639,6 +617,21 @@ function GameRoom({
           <LogOut size={16} /> Leave room
         </button>
       </div>
+      {showInvite && (
+        <div className="invite-fallback">
+          <label>
+            Invitation link
+            <input
+              readOnly
+              value={inviteUrl}
+              onFocus={(event) => event.target.select()}
+            />
+          </label>
+          <button className="text-button" onClick={() => setShowInvite(false)}>
+            Hide link
+          </button>
+        </div>
+      )}
       <div className="room-heading">
         <div>
           <h1>{room.name}</h1>
@@ -806,7 +799,14 @@ function GameRoom({
                 <form
                   onSubmit={async (e) => {
                     e.preventDefault();
-                    await action("story:submit", { text });
+                    if (
+                      await action("story:submit", {
+                        text,
+                        gameId: room.gameId,
+                        turn: room.turn,
+                      })
+                    )
+                      writeDraft(draftKey, "");
                   }}
                 >
                   <label className="sr-only" htmlFor="contribution">
@@ -815,7 +815,10 @@ function GameRoom({
                   <textarea
                     id="contribution"
                     value={text}
-                    onChange={(e) => setText(e.target.value)}
+                    onChange={(e) => {
+                      setText(e.target.value);
+                      writeDraft(draftKey, e.target.value);
+                    }}
                     maxLength={240}
                     placeholder={
                       room.previous
@@ -917,57 +920,123 @@ function App() {
   );
   const [room, setRoom] = useState<Room | null>(null);
   const [busy, setBusy] = useState(false);
+  const pending = useRef(false);
   const [message, setMessage] = useState("");
   const [connected, setConnected] = useState(false);
   const [restoring, setRestoring] = useState(!!getSession());
   useEffect(() => {
-    const onConnect = async () => {
-      setConnected(true);
-      const session = getSession();
-      if (session) {
-        setRestoring(true);
-        try {
-          await request("player:reconnect", session);
-        } catch (error) {
+    let generation = 0;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    const invitation = new URLSearchParams(location.search)
+      .get("room")
+      ?.trim()
+      .toUpperCase();
+    // An explicit invitation takes priority over an unrelated saved room.
+    let session = getSession();
+    if (invitation && session && session.code !== invitation) session = null;
+    const onSession = (value: Session) => {
+      session = value;
+      if (!saveSession(value))
+        setMessage(
+          "Browser storage is unavailable. Keep this tab open to preserve your session.",
+        );
+    };
+    const restore = async (attempt: number) => {
+      if (!socket.connected || attempt !== generation) return;
+      if (!session) {
+        setConnected(true);
+        setRestoring(false);
+        return;
+      }
+      setRestoring(true);
+      try {
+        await request("player:reconnect", session);
+        if (attempt !== generation) return;
+        setConnected(true);
+        setRestoring(false);
+      } catch (error) {
+        if (attempt !== generation) return;
+        if (error instanceof RequestError && error.code === "SESSION_EXPIRED") {
           clearSession();
+          session = null;
           setRoom(null);
-          setMessage((error as Error).message);
+          setPage(invitation ? "join" : "home");
+          setRestoring(false);
+          setConnected(true);
+          setMessage(error.message);
+        } else {
+          // A timeout or temporary rate limit is not proof of an expired room.
+          setMessage(
+            "Reconnecting to your room. Your place and writing are saved.",
+          );
+          retry = setTimeout(() => {
+            void restore(attempt);
+          }, 2000);
         }
       }
-      setRestoring(false);
     };
-    const onDisconnect = () => setConnected(false);
+    const onConnect = () => {
+      clearTimeout(retry);
+      setConnected(false);
+      void restore(++generation);
+    };
+    const onDisconnect = () => {
+      ++generation;
+      clearTimeout(retry);
+      setConnected(false);
+    };
     const onState = (state: Room) => {
       setRoom(state);
       setPage("room");
     };
     const onExpired = () => {
+      ++generation;
+      clearTimeout(retry);
       clearSession();
+      session = null;
       setRoom(null);
       setPage("home");
+      setRestoring(false);
+      setConnected(socket.connected);
+      history.replaceState({}, "", location.pathname);
       setMessage(
         "This room has expired after inactivity. Start a fresh story.",
       );
     };
     const onReplaced = () => {
-      clearSession();
+      ++generation;
+      clearTimeout(retry);
+      releaseSession();
+      session = null;
       setRoom(null);
       setPage("home");
+      setRestoring(false);
+      setConnected(false);
       setMessage(
-        "This session was opened in another tab. Use different browser profiles for different players.",
+        "This player is active in a duplicated tab. Continue there, or reconnect here to join as another player.",
       );
     };
+    const onLeave = () => {
+      session = null;
+    };
+    // Clear the closure's saved session after a deliberate local leave.
+    window.addEventListener("plotrelay:leave", onLeave);
     socket.on("connect", onConnect);
     socket.on("disconnect", onDisconnect);
     socket.on("room:state", onState);
+    socket.on("player:session", onSession);
     socket.on("room:expired", onExpired);
     socket.on("session:replaced", onReplaced);
     socket.on("connect_error", onDisconnect);
     socket.connect();
     return () => {
+      ++generation;
+      clearTimeout(retry);
+      window.removeEventListener("plotrelay:leave", onLeave);
       socket.off("connect", onConnect);
       socket.off("disconnect", onDisconnect);
       socket.off("room:state", onState);
+      socket.off("player:session", onSession);
       socket.off("room:expired", onExpired);
       socket.off("session:replaced", onReplaced);
       socket.off("connect_error", onDisconnect);
@@ -981,25 +1050,18 @@ function App() {
     }
   }, [message]);
   async function action(event: string, data = {}) {
-    if (busy) return false;
+    if (pending.current || !connected) return false;
+    pending.current = true;
     setBusy(true);
     try {
       const reply = await request(event, data);
-      if (reply.token) {
-        try {
-          localStorage.setItem(
-            "plotrelay-session",
-            JSON.stringify({ code: reply.code, token: reply.token }),
-          );
-        } catch {
-          setMessage(
-            "Browser storage is unavailable. Keep this tab open to preserve your session.",
-          );
-        }
-        history.replaceState({}, "", location.pathname);
+      if (reply.token && reply.code) {
+        saveSession({ code: reply.code, token: reply.token });
+        history.replaceState({}, "", `${location.pathname}?room=${reply.code}`);
       }
       if (event === "room:leave") {
         clearSession();
+        window.dispatchEvent(new Event("plotrelay:leave"));
         setRoom(null);
         setPage("home");
         history.replaceState({}, "", "/");
@@ -1009,6 +1071,7 @@ function App() {
       setMessage((error as Error).message);
       return false;
     } finally {
+      pending.current = false;
       setBusy(false);
     }
   }
@@ -1048,7 +1111,19 @@ function App() {
         {!connected && (
           <div className="connection-banner" role="status">
             <LoaderCircle className="spin" size={16} /> Reconnecting to
-            PlotRelay. Your place is saved while the room is active.
+            PlotRelay.{" "}
+            {getSession()
+              ? "Your place is saved while the room is active."
+              : "Waiting for the game server."}
+            <button
+              className="text-button"
+              onClick={() => {
+                socket.disconnect();
+                socket.connect();
+              }}
+            >
+              Retry connection
+            </button>
           </div>
         )}
         <main>
@@ -1067,9 +1142,10 @@ function App() {
                 </div>
               ) : room ? (
                 <GameRoom
+                  key={`${room.code}:${room.you}:${room.gameId}:${room.turn}`}
                   room={room}
                   action={action}
-                  busy={busy || !connected}
+                  busy={busy || !connected || restoring}
                   notify={setMessage}
                 />
               ) : page === "home" ? (
@@ -1077,7 +1153,7 @@ function App() {
               ) : (
                 <RoomForm
                   kind={page}
-                  busy={busy || !connected}
+                  busy={busy || !connected || restoring}
                   submit={action}
                   back={() => navigate("home")}
                 />

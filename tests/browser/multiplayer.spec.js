@@ -100,3 +100,63 @@ test("landing and forms fit a narrow mobile viewport", async ({ page }) => {
     page.getByRole("button", { name: "Create my room" }),
   ).toBeVisible();
 });
+
+test("two tabs in the same browser can join as different players", async ({
+  context,
+}) => {
+  const host = await context.newPage();
+  await host.goto("/");
+  await host
+    .getByRole("button", { name: "Create a room", exact: true })
+    .click();
+  await host.getByLabel("Your nickname").fill("TabHost");
+  await host.getByRole("button", { name: "Create my room" }).click();
+  await expect(host.locator(".room-code strong")).toBeVisible();
+  const code = (await host.locator(".room-code strong").innerText()).trim();
+  const guest = await context.newPage();
+  await guest.goto(`/?room=${code}`);
+  await expect(guest.getByRole("button", { name: "Let me in" })).toBeVisible();
+  await guest.getByLabel("Your nickname").fill("TabGuest");
+  await guest.getByRole("button", { name: "Let me in" }).click();
+  await expect(host.locator(".player-card")).toHaveCount(2);
+  await expect(guest.locator(".player-card")).toHaveCount(2);
+  await host.reload();
+  await guest.reload();
+  await expect(
+    host.getByRole("button", { name: "Start the story" }),
+  ).toBeEnabled();
+  await expect(
+    guest.getByText("Waiting for the host to start the story"),
+  ).toBeVisible();
+});
+
+test("a writing draft survives page refresh", async ({ browser }) => {
+  const a = await browser.newContext(),
+    b = await browser.newContext();
+  try {
+    const host = await a.newPage(),
+      guest = await b.newPage();
+    await host.goto("/");
+    await host
+      .getByRole("button", { name: "Create a room", exact: true })
+      .click();
+    await host.getByLabel("Your nickname").fill("DraftHost");
+    await host.getByRole("button", { name: "Create my room" }).click();
+    await expect(host.locator(".room-code strong")).toBeVisible();
+    const code = (await host.locator(".room-code strong").innerText()).trim();
+    await guest.goto(`/?room=${code}`);
+    await guest.getByLabel("Your nickname").fill("DraftGuest");
+    await guest.getByRole("button", { name: "Let me in" }).click();
+    await host.getByRole("button", { name: "Start the story" }).click();
+    await host
+      .getByLabel("Your story contribution")
+      .fill("Do not lose this unfinished opening.");
+    await host.reload();
+    await expect(host.getByLabel("Your story contribution")).toHaveValue(
+      "Do not lose this unfinished opening.",
+    );
+  } finally {
+    await a.close();
+    await b.close();
+  }
+});

@@ -1989,3 +1989,24 @@ textarea {
     scroll-behavior: auto !important;
   }
 }
+
+.invite-fallback {
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid #7955ff66;
+  border-radius: 12px;
+  background: #28213d;
+}
+.invite-fallback label {
+  margin-top: 0;
+}
+.invite-fallback input {
+  font-size: 12px;
+}
+.connection-banner {
+  flex-wrap: wrap;
+}
+.connection-banner .text-button {
+  color: #ffe36e;
+  text-decoration: underline;
+}

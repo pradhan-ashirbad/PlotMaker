@@ -8,8 +8,15 @@ const call = (socket, event, data = {}) =>
   new Promise((resolve, reject) =>
     socket
       .timeout(2000)
-      .emit(event, data, (error, result) =>
-        error ? reject(error) : resolve(result),
+      .emit(
+        event,
+        {
+          ...(event === "story:submit"
+            ? { gameId: socket.state?.gameId, turn: socket.state?.turn }
+            : {}),
+          ...data,
+        },
+        (error, result) => (error ? reject(error) : resolve(result)),
       ),
   );
 async function waitFor(check, ms = 2500) {
@@ -252,4 +259,95 @@ test("message flooding is rate limited without changing room state", async (t) =
   assert.equal(limited, true);
   assert.equal(host.state.status, "lobby");
   assert.equal(host.state.completed, 0);
+});
+
+test("returning to the lobby preserves an offline player reconnect identity", async (t) => {
+  const { host, created, client } = await fixture(t);
+  const guest = await client();
+  const joined = await call(guest, "room:join", {
+    code: created.code,
+    nickname: "Guest",
+  });
+  await call(host, "game:start");
+  await call(host, "story:submit", { text: "Opening" });
+  await waitFor(() => guest.state.currentPlayerId === guest.state.you);
+  assert.equal(
+    (await call(guest, "story:submit", { text: "Ending" })).ok,
+    true,
+  );
+  guest.disconnect();
+  await waitFor(() => !host.state.players[1].connected);
+  await call(host, "game:reset");
+  const refreshed = await client();
+  const restored = await call(refreshed, "player:reconnect", joined);
+  assert.equal(restored.ok, true, restored.error);
+  await waitFor(() => refreshed.state?.status === "lobby");
+  assert.equal(refreshed.state.players.length, 2);
+});
+
+test("retrying acknowledged-lost mutations does not apply them twice", async (t) => {
+  const { app, host, created, client } = await fixture(t);
+  const guest = await client();
+  const join = {
+    code: created.code,
+    nickname: "Retry Guest",
+    requestId: "a".repeat(32),
+  };
+  const first = await call(guest, "room:join", join);
+  assert.deepEqual(await call(guest, "room:join", join), first);
+  assert.equal(app.game.rooms.get(created.code).players.length, 2);
+  const start = { requestId: "b".repeat(32) };
+  assert.equal((await call(host, "game:start", start)).ok, true);
+  assert.equal((await call(host, "game:start", start)).ok, true);
+  const submit = {
+    text: "Send exactly once.",
+    gameId: host.state.gameId,
+    turn: host.state.turn,
+    requestId: "c".repeat(32),
+  };
+  assert.equal((await call(host, "story:submit", submit)).ok, true);
+  assert.equal((await call(host, "story:submit", submit)).ok, true);
+  assert.equal(app.game.rooms.get(created.code).panels.length, 1);
+  assert.equal(
+    (await call(host, "story:submit", { ...submit, text: "Changed content" }))
+      .ok,
+    false,
+  );
+});
+
+test("an old submission cannot become the opening of the next game", async (t) => {
+  const { host, created, client } = await fixture(t);
+  const guest = await client();
+  await call(guest, "room:join", { code: created.code, nickname: "Guest" });
+  await call(host, "game:start");
+  const oldTurn = { text: "Old opening", gameId: host.state.gameId, turn: 0 };
+  await call(host, "story:submit", oldTurn);
+  await waitFor(() => guest.state.currentPlayerId === guest.state.you);
+  await call(guest, "story:submit", { text: "End" });
+  await waitFor(() => host.state.status === "reveal");
+  await call(host, "game:reset");
+  await call(host, "game:start");
+  assert.notEqual(host.state.gameId, oldTurn.gameId);
+  assert.equal((await call(host, "story:submit", oldTurn)).ok, false);
+  assert.equal(host.state.completed, 0);
+});
+
+test("full invitation URLs join and expired reconnects have an explicit error code", async (t) => {
+  const { created, client } = await fixture(t);
+  const guest = await client();
+  assert.equal(
+    (
+      await call(guest, "room:join", {
+        code: `https://example.com/?room=${created.code.toLowerCase()}`,
+        nickname: "Link Guest",
+      })
+    ).ok,
+    true,
+  );
+  const stranger = await client();
+  const response = await call(stranger, "player:reconnect", {
+    code: created.code,
+    token: "invalid",
+  });
+  assert.equal(response.errorCode, "SESSION_EXPIRED");
 });

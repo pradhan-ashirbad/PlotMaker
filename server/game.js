@@ -34,6 +34,8 @@ export function installGame(
     const current = room.players[room.turn];
     return {
       code: room.code,
+      gameId: room.gameId,
+      serverTime: Date.now(),
       name: room.name,
       genre: room.genre,
       maxPlayers: room.maxPlayers,
@@ -103,6 +105,8 @@ export function installGame(
     player.connected = true;
     player.disconnectedAt = null;
     room.updatedAt = Date.now();
+    // Deliver credentials independently of the action acknowledgement.
+    socket.emit("player:session", { code: room.code, token: player.token });
   }
   function leave(socket, permanent = false) {
     let session;
@@ -137,6 +141,7 @@ export function installGame(
   io.on("connection", (socket) => {
     let budget = 0,
       windowStart = Date.now();
+    const responses = new Map();
     function handle(event, fn) {
       socket.on(event, (data, ack) => {
         if (typeof ack !== "function") return;
@@ -157,10 +162,36 @@ export function installGame(
           }
           if (++limit.count > 200)
             throw new Error("Too many requests. Please try again shortly.");
-          const result = fn(data && typeof data === "object" ? data : {});
-          ack({ ok: true, ...result });
+          const input = data && typeof data === "object" ? data : {};
+          const key =
+            typeof input.requestId === "string" &&
+            /^[a-f0-9]{32}$/.test(input.requestId)
+              ? `${event}:${input.requestId}`
+              : null;
+          const fingerprint = JSON.stringify(input);
+          if (key && responses.has(key)) {
+            const cached = responses.get(key);
+            if (cached.fingerprint !== fingerprint)
+              throw new Error(
+                "A request cannot be reused with different data.",
+              );
+            ack(cached.reply);
+            return;
+          }
+          const result = fn(input);
+          const reply = { ok: true, ...result };
+          if (key) {
+            responses.set(key, { fingerprint, reply });
+            if (responses.size > 50)
+              responses.delete(responses.keys().next().value);
+          }
+          ack(reply);
         } catch (error) {
-          ack({ ok: false, error: error.message });
+          ack({
+            ok: false,
+            error: error.message,
+            errorCode: error.code || "REJECTED",
+          });
         }
       });
     }
@@ -202,6 +233,7 @@ export function installGame(
         panels: [],
         turn: 0,
         status: "lobby",
+        gameId: null,
         updatedAt: Date.now(),
       };
       rooms.set(code, room);
@@ -212,7 +244,19 @@ export function installGame(
     handle("room:join", (data) => {
       if (socket.data.roomCode)
         throw new Error("Leave your current room first.");
-      const code = clean(data.code, 10, "Room code").toUpperCase();
+      let rawCode = clean(data.code, 2048, "Room code or invitation link");
+      if (/^https?:\/\//i.test(rawCode)) {
+        try {
+          rawCode = new URL(rawCode).searchParams.get("room") || "";
+        } catch {
+          throw new Error("Invalid invitation link.");
+        }
+      }
+      const code = rawCode.trim().toUpperCase();
+      if (!/^[A-F0-9]{10}$/.test(code))
+        throw new Error(
+          "Enter a 10-character room code or a full invitation link.",
+        );
       const room = rooms.get(code);
       if (!room)
         throw new Error("Room not found. Check the code or create a new room.");
@@ -248,10 +292,13 @@ export function installGame(
       const player = room?.players.find(
         (p) => p.token === data.token && !p.left,
       );
-      if (!player)
-        throw new Error(
-          "Your previous room has expired. Create or join a new room.",
+      if (!player) {
+        const error = new Error(
+          "Your previous room has expired or your seat was removed. Create or join a new room.",
         );
+        error.code = "SESSION_EXPIRED";
+        throw error;
+      }
       if (
         socket.data.roomCode &&
         (socket.data.roomCode !== room.code ||
@@ -292,6 +339,7 @@ export function installGame(
       room.players.forEach((p) => {
         p.skipped = false;
       });
+      room.gameId = randomBytes(16).toString("hex");
       room.status = "writing";
       room.turn = 0;
       room.panels = [];
@@ -305,6 +353,10 @@ export function installGame(
         room.players[room.turn]?.id !== player.id
       )
         throw new Error("It is not your turn.");
+      if (data.gameId !== room.gameId || data.turn !== room.turn)
+        throw new Error(
+          "This turn has ended. Your game has been refreshed; check the current writer.",
+        );
       const text = clean(data.text, 240, "Story panel");
       room.panels.push({
         text,
@@ -346,7 +398,7 @@ export function installGame(
         throw new Error(
           "The host can return everyone to the lobby after the reveal.",
         );
-      room.players = room.players.filter((p) => p.connected && !p.left);
+      room.players = room.players.filter((p) => !p.left);
       room.players.forEach((p) => {
         p.skipped = false;
       });

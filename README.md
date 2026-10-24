@@ -15,7 +15,7 @@ npm run dev
 
 Open port **5173**. Vite proxies Socket.IO and health requests to the Node server on **3001**. To play on multiple devices on the same network, open `http://YOUR_COMPUTER_LAN_IP:5173` on each device and allow those ports through your local firewall. Invitation links use the address where the host opened the site; use a LAN address or public domain, rather than localhost, when inviting another device.
 
-Create a room, copy its invitation link, and invite a second player. Use distinct browsers or browser profiles to simulate multiple players on one machine. Refresh restores the current player from a random token in local storage. Two tabs in the same browser profile share that identity; reconnecting takes over the previous socket.
+Create a room, copy its invitation link, and invite a second player. Open separate tabs, browsers, or devices to play as different people. Each tab keeps its own player identity across refreshes: a tab-local pointer references a random reconnect token in local storage. Duplicating a tab may copy its pointer; the new copy takes over that identity and the original offers a reconnect button to join as another player. Open a fresh tab for a separate player. An explicit invitation to another room takes priority over the tab’s previous room. Closing a tab ends that tab’s automatic recovery; a disconnected seat remains until the host removes it or the room expires.
 
 ```sh
 npm run build
@@ -27,12 +27,13 @@ Production serves both the compiled frontend and Socket.IO on port **3001** (or 
 ## Gameplay
 
 - The host selects the room name, nickname, participant limit and genre. Random resolves to one genre for the room.
-- At least two connected players are required. The host starts and writes the opening panel.
+- At least two connected players are required. The host starts and writes the opening panel. Disconnected lobby players must reconnect or be removed after their grace period before starting.
 - The host goes first, followed by join order. Each player gets one turn, limited to 240 characters.
 - Only the active writer receives the immediately preceding panel. Waiting clients receive no contributions. After completion, all players receive the same finished story.
 - Twist suggestions are optional predefined prompts; they use no AI service.
-- The reveal animates each comic panel. Replay, download a PNG, or share using Web Share where available. Browsers without native sharing download the image instead. Clipboard and native sharing generally require HTTPS outside localhost.
-- The host returns the whole room to the lobby for another story. Other players can stay or leave without interrupting everyone else's reveal.
+- The reveal animates each comic panel. Replay, download a PNG, or share using Web Share where available. Browsers without native sharing download the image instead. Clipboard and native sharing generally require HTTPS outside localhost. When clipboard access fails, the lobby provides a selectable invitation link. The join form accepts either the code or the complete link.
+- Unfinished writing is saved in the tab as you type and restored after a refresh. Each story has its own ID, so a previous story’s draft or delayed submission cannot become part of a new one.
+- The host returns the whole room to the lobby for another story. Disconnected players keep their seats and reconnect tokens through this transition. Other players can stay or leave without interrupting everyone else's reveal.
 - Disconnected players retain their seat. After 30 seconds, the host can remove them from the lobby or skip their active turn. Skipped players may reconnect to watch the reveal. A disconnected host transfers ownership to the first connected player after the grace period. Explicitly leaving transfers hosting immediately and advances an active turn.
 
 ## Tests
@@ -43,7 +44,7 @@ npm run build            # TypeScript validation and production bundle
 npm run test:browser     # independent desktop/mobile Chromium contexts
 ```
 
-Browser tests use `/usr/bin/chromium` by default. Set `CHROMIUM_PATH` to a Chromium executable on your machine; for example install Playwright Chromium with `npx playwright install chromium` and supply its executable path. The runner starts the production server automatically, so build first. Screenshots and the exported comic are written to `/tmp/plotrelay-*.png`. Browser tests cover room creation, invitation joining, live lobby updates, private turns, refresh, twist suggestions, shared final story, replay, image download, restarting, and narrow-screen overflow. Server tests additionally cover capacity, invalid sessions, unauthorized turns, duplicate submissions, host transfer, grace periods, skipping, leaving, room cleanup, and message rate limiting.
+Browser tests use `/usr/bin/chromium` by default. Set `CHROMIUM_PATH` to a Chromium executable on your machine; for example install Playwright Chromium with `npx playwright install chromium` and supply its executable path. The runner starts the production server automatically, so build first. Screenshots and the exported comic are written to `/tmp/plotrelay-*.png`. Browser tests cover room creation, invitation joining, live lobby updates, private turns, refresh, twist suggestions, shared final story, replay, image download, restarting, and narrow-screen overflow. Server tests additionally cover capacity, invalid sessions, unauthorized turns, duplicate submissions, host transfer, grace periods, skipping, leaving, room cleanup, and message rate limiting. Recovery regressions cover same-browser tabs, saved writing drafts, disconnected players returning after a reset, invitation changes, full-link joining, clipboard denial, delayed old-game submissions, dropped acknowledgements, transient reconnect timeouts, and a real server restart.
 
 ## Deploy on a persistent Node host
 
@@ -75,10 +76,18 @@ No credentials are required. **All rooms and stories live in server memory and d
 - `server/game.js`: transport handlers, authoritative room state, per-player projections, reconnect and cleanup lifecycle.
 - `server/index.js`: HTTP server, static production hosting, Socket.IO transport, health endpoint.
 - `src/main.tsx`: reusable avatars, comics, room forms, lobby, writing, waiting and reveal components.
+- `src/session.ts`: tab-scoped player identity, persistent reconnect tokens, and writing drafts.
+- `src/connection.ts`: bounded request retries on the same live socket with unique request IDs.
 - `src/export.ts`: canvas-rendered PNG export with variable-height panels, including long words and multiline text.
 - `src/styles.css`: responsive theme and comic artwork; reduced-motion support.
 - `tests/`: server integration tests and browser journeys.
 
-Room codes use 40 bits of randomness; reconnect tokens use 256 bits. Tokens are returned only to their player and never broadcast. Inputs are type/length validated, socket packets capped at 8 KB, and messages rate limited per connection and transport IP. User text is rendered as React text or drawn to canvas, never injected as HTML. One socket can occupy one identity at a time. Room count is bounded to 1,000.
+Room codes use 40 bits of randomness; reconnect tokens use 256 bits. Tokens are returned only to their player and never broadcast. Inputs are type/length validated, socket packets capped at 8 KB, and messages rate limited per connection and transport IP. User text is rendered as React text or drawn to canvas, never injected as HTML. One socket can occupy one identity at a time. Successful mutation replies are cached per socket (up to 50) so a lost acknowledgement can be retried without applying the command twice. Reconnect timeouts preserve the player token; only an explicit expired-session response clears it. Story submissions must match the active game ID and turn, preventing delayed traffic from changing another game. Room count is bounded to 1,000.
 
-This is a prototype: behind a reverse proxy, transport-IP limits may apply to many users together; tune this before a large public launch. There is no account recovery or moderation service. Anyone with an invitation code may join an open lobby. Browser storage is the reconnect credential, so use a separate profile on shared devices. Store and game engine boundaries can be extracted into a shared persistence layer and reused by a future mobile client.
+This is a prototype: behind a reverse proxy, transport-IP limits may apply to many users together; tune this before a large public launch. There is no account recovery or moderation service. Anyone with an invitation code may join an open lobby. Browser storage holds reconnect credentials; use a separate browser profile on shared devices when privacy is needed. Store and game engine boundaries can be extracted into a shared persistence layer and reused by a future mobile client.
+
+## Troubleshooting a hosted site
+
+The frontend and Socket.IO server must both run. Publishing only `dist/` to a static host will display the homepage but cannot create or join multiplayer rooms. Use the single Node service described above; its `npm start` serves both on the same origin. Verify `/api/health` returns the PlotRelay JSON and that the reverse proxy forwards `/socket.io/` HTTP polling and WebSocket upgrade requests to the same process. `npm run dev` is for development; `npm run build && npm start` is the production workflow. A backend restart necessarily loses rooms in this no-database prototype, but connected browsers recover to a usable create/join screen.
+
+If the connection banner remains visible, confirm the backend process is running and `APP_ORIGIN`, when configured, exactly matches the browser origin (scheme, hostname, and any port). The Retry connection button reconnects without discarding a valid session. A temporary timeout is retried automatically; a removed seat or restarted room is reported explicitly. Do not run multiple replicas with independent in-memory room stores.
