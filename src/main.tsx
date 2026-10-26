@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { socket, request, RequestError } from "./connection";
+import { socket, request, RequestError, missingBackend } from "./connection";
 import {
   getSession,
   saveSession,
@@ -1028,7 +1028,7 @@ function App() {
     socket.on("room:expired", onExpired);
     socket.on("session:replaced", onReplaced);
     socket.on("connect_error", onDisconnect);
-    socket.connect();
+    if (!missingBackend) socket.connect();
     return () => {
       ++generation;
       clearTimeout(retry);
@@ -1110,13 +1110,15 @@ function App() {
         </header>
         {!connected && (
           <div className="connection-banner" role="status">
-            <LoaderCircle className="spin" size={16} /> Reconnecting to
-            PlotRelay.{" "}
-            {getSession()
-              ? "Your place is saved while the room is active."
-              : "Waiting for the game server."}
+            <LoaderCircle className="spin" size={16} />
+            {missingBackend
+              ? "This website hasn’t been connected to a game server yet. The site owner needs to finish setup before rooms can open."
+              : getSession()
+                ? "Reconnecting to PlotRelay. Your place is saved while the room is active."
+                : "Connecting to the game server. It may take a minute to wake up."}
             <button
               className="text-button"
+              disabled={missingBackend}
               onClick={() => {
                 socket.disconnect();
                 socket.connect();

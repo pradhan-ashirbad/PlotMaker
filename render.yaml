@@ -1,0 +1,14 @@
+# Deploy this as a Render Blueprint. It creates one Node service, no database.
+services:
+  - type: web
+    name: plotrelay-server
+    runtime: node
+    plan: free
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+      - key: APP_ORIGIN
+        value: https://plot-maker.vercel.app

@@ -1,7 +1,13 @@
 import { io } from "socket.io-client";
 import { newId } from "./session";
 
-export const socket = io({ autoConnect: false });
+const serverUrl = import.meta.env.VITE_SERVER_URL?.trim().replace(/\/$/, "");
+export const missingBackend =
+  location.hostname.endsWith(".vercel.app") && !serverUrl;
+export const socket = io(serverUrl || undefined, {
+  autoConnect: false,
+  timeout: 20_000,
+});
 export type Reply = {
   ok: boolean;
   error?: string;

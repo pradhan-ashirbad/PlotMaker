@@ -46,6 +46,10 @@ npm run test:browser     # independent desktop/mobile Chromium contexts
 
 Browser tests use `/usr/bin/chromium` by default. Set `CHROMIUM_PATH` to a Chromium executable on your machine; for example install Playwright Chromium with `npx playwright install chromium` and supply its executable path. The runner starts the production server automatically, so build first. Screenshots and the exported comic are written to `/tmp/plotrelay-*.png`. Browser tests cover room creation, invitation joining, live lobby updates, private turns, refresh, twist suggestions, shared final story, replay, image download, restarting, and narrow-screen overflow. Server tests additionally cover capacity, invalid sessions, unauthorized turns, duplicate submissions, host transfer, grace periods, skipping, leaving, room cleanup, and message rate limiting. Recovery regressions cover same-browser tabs, saved writing drafts, disconnected players returning after a reset, invitation changes, full-link joining, clipboard denial, delayed old-game submissions, dropped acknowledgements, transient reconnect timeouts, and a real server restart.
 
+## Deploy with Vercel + Render
+
+**For the existing `https://plot-maker.vercel.app` website, follow [the Vercel + Render setup](docs/VERCEL.md).** Vercel hosts the React frontend; deploy the in-memory Socket.IO server as the Render web service defined in `render.yaml`. Then set `VITE_SERVER_URL` in Vercel to the actual backend HTTPS origin and redeploy. The backend allows the Vercel origin via `APP_ORIGIN`. No backend URL is hard-coded or guessed. Vercel builds without this required setting now fail with setup instructions.
+
 ## Deploy on a persistent Node host
 
 Use a Node web service such as Render, Railway, Fly.io, or a VM with a process supervisor. Configure:
@@ -55,19 +59,20 @@ Use a Node web service such as Render, Railway, Fly.io, or a VM with a process s
 - Health path: `/api/health`
 - One process / one replica, with a persistent running service (no scale-to-zero for an uninterrupted game).
 - HTTPS on the public domain. Forward both HTTP and WebSocket traffic to `PORT`; proxies must forward WebSocket upgrade headers. Keep proxy timeouts above Socket.IO's heartbeat window (60 seconds or more).
-- Optional `APP_ORIGIN=https://your-domain.example` restricts browser socket origins to your public frontend. Do not include a trailing slash. Leave unset for the local Vite proxy workflow.
+- Optional `APP_ORIGIN=https://your-domain.example` restricts browser socket origins to your public frontend. Multiple exact origins can be comma-separated; trailing slashes are normalized. Leave unset for the local Vite proxy workflow.
 
 A Dockerfile is included. Build with `docker build -t plotrelay .` and run with `docker run --rm -p 3001:3001 -e APP_ORIGIN=https://your-domain.example plotrelay`. Docker deployment is documented, not validated in the cloud workspace.
 
 ### Configuration
 
-| Variable             | Default             | Purpose                                          |
-| -------------------- | ------------------- | ------------------------------------------------ |
-| `PORT`               | `3001`              | HTTP and Socket.IO listener                      |
-| `APP_ORIGIN`         | unset               | Optional permitted browser origin                |
-| `RECONNECT_GRACE_MS` | `30000`             | Host transfer / disconnected-player skip delay   |
-| `ROOM_TTL_MS`        | `3600000`           | Remove rooms after this much gameplay inactivity |
-| `CHROMIUM_PATH`      | `/usr/bin/chromium` | Browser test executable only                     |
+| Variable             | Default             | Purpose                                                                          |
+| -------------------- | ------------------- | -------------------------------------------------------------------------------- |
+| `PORT`               | `3001`              | HTTP and Socket.IO listener                                                      |
+| `VITE_SERVER_URL`    | unset               | Public backend origin embedded in the frontend at build time; required on Vercel |
+| `APP_ORIGIN`         | unset               | Optional permitted browser origin                                                |
+| `RECONNECT_GRACE_MS` | `30000`             | Host transfer / disconnected-player skip delay                                   |
+| `ROOM_TTL_MS`        | `3600000`           | Remove rooms after this much gameplay inactivity                                 |
+| `CHROMIUM_PATH`      | `/usr/bin/chromium` | Browser test executable only                                                     |
 
 No credentials are required. **All rooms and stories live in server memory and disappear on restart or deployment.** Inactive rooms expire even if their browser tabs remain open. This prototype cannot be horizontally scaled without introducing a shared room store and coordination. Live processes do not survive cloud environment snapshots; start the server again in new tasks.
 
@@ -88,6 +93,6 @@ This is a prototype: behind a reverse proxy, transport-IP limits may apply to ma
 
 ## Troubleshooting a hosted site
 
-The frontend and Socket.IO server must both run. Publishing only `dist/` to a static host will display the homepage but cannot create or join multiplayer rooms. Use the single Node service described above; its `npm start` serves both on the same origin. Verify `/api/health` returns the PlotRelay JSON and that the reverse proxy forwards `/socket.io/` HTTP polling and WebSocket upgrade requests to the same process. `npm run dev` is for development; `npm run build && npm start` is the production workflow. A backend restart necessarily loses rooms in this no-database prototype, but connected browsers recover to a usable create/join screen.
+The frontend and Socket.IO server must both run. Publishing only `dist/` to a static host will display the homepage but cannot create or join multiplayer rooms. Use either the single Node service described above, or the documented Vercel frontend + Render backend configuration. Verify `/api/health` returns the PlotRelay JSON and that the reverse proxy forwards `/socket.io/` HTTP polling and WebSocket upgrade requests to the same process. `npm run dev` is for development; `npm run build && npm start` is the production workflow. A backend restart necessarily loses rooms in this no-database prototype, but connected browsers recover to a usable create/join screen.
 
 If the connection banner remains visible, confirm the backend process is running and `APP_ORIGIN`, when configured, exactly matches the browser origin (scheme, hostname, and any port). The Retry connection button reconnects without discarding a valid session. A temporary timeout is retried automatically; a removed seat or restarted room is reported explicitly. Do not run multiple replicas with independent in-memory room stores.

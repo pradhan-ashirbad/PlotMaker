@@ -5,28 +5,50 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { installGame } from "./game.js";
 
-export function createApp(options = {}) {
+export function createApp({
+  appOrigin = process.env.APP_ORIGIN,
+  ...options
+} = {}) {
+  const allowedOrigins = (appOrigin || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((value) => {
+      const url = new URL(value);
+      if (
+        !["http:", "https:"].includes(url.protocol) ||
+        url.username ||
+        url.password ||
+        url.pathname !== "/" ||
+        url.search ||
+        url.hash
+      )
+        throw new Error(
+          "APP_ORIGIN must contain comma-separated HTTP(S) origins, without paths or credentials.",
+        );
+      return url.origin;
+    });
+  const permitsOrigin = (origin) =>
+    !origin || !allowedOrigins.length || allowedOrigins.includes(origin);
   const app = express();
   app.disable("x-powered-by");
   const server = createServer(app);
   const io = new Server(server, {
     maxHttpBufferSize: 8192,
-    ...(process.env.APP_ORIGIN
-      ? {
-          cors: { origin: process.env.APP_ORIGIN },
-          allowRequest: (req, callback) =>
-            callback(
-              null,
-              !req.headers.origin ||
-                req.headers.origin === process.env.APP_ORIGIN,
-            ),
-        }
-      : {}),
+    cors: {
+      origin: (origin, callback) => callback(null, permitsOrigin(origin)),
+    },
+    allowRequest: (req, callback) =>
+      callback(null, permitsOrigin(req.headers.origin)),
   });
   const game = installGame(io, options);
-  app.get("/api/health", (_req, res) =>
-    res.json({ ok: true, service: "PlotRelay" }),
-  );
+  app.get("/api/health", (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.vary("Origin");
+    if (req.headers.origin && permitsOrigin(req.headers.origin))
+      res.setHeader("Access-Control-Allow-Origin", req.headers.origin);
+    res.json({ ok: true, service: "PlotRelay" });
+  });
   const dist = fileURLToPath(new URL("../dist/", import.meta.url));
   app.use(express.static(dist));
   app.get("/{*path}", (_req, res) =>
